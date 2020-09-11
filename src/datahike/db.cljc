@@ -6,7 +6,7 @@
    #?(:clj [clojure.pprint :as pp])
    [datahike.index :refer [-slice -seq -count -all -persistent! -transient] :as di]
    [datahike.datom :as dd :refer [datom datom-tx datom-added datom?]]
-   [datahike.constants :refer [e0 tx0 emax txmax system-schema]]
+   [datahike.constants :as c :refer [e0 tx0 emax txmax system-schema u0 s0]]
    [datahike.tools :refer [get-time case-tree raise]]
    [datahike.schema :as ds]
    [me.tonsky.persistent-sorted-set.arrays :as arrays]
@@ -19,16 +19,13 @@
                    [java.util Date]
                    [datahike.datom Datom])))
 
-;; ----------------------------------------------------------------------------
-
 #?(:cljs
    (do
      (def Exception js/Error)
      (def IllegalArgumentException js/Error)
      (def UnsupportedOperationException js/Error)))
 
-(def ^:const implicit-schema {:db/ident {:db/unique :db.unique/identity}})
-
+(def ^:const implicit-schema (c/system-map system-schema))
 ;; ----------------------------------------------------------------------------
 
 (defn #?@(:clj  [^Boolean seqable?]
@@ -129,6 +126,8 @@
   (-rschema [db])
   (-attrs-by [db property])
   (-max-tx [db])
+  (-max-eid [db])
+  (-max-sid [db])
   (-temporal-index? [db]) ;;deprecated
   (-keep-history? [db])
   (-config [db]))
@@ -170,24 +169,24 @@
                        (filter (fn [^Datom d] (= tx (datom-tx d)))))
                   (-slice eavt (datom e nil nil tx0) (datom e nil nil txmax) :eavt) ;; e _ _ _
                   (if indexed?                              ;; _ a v tx
-                    (->> (-slice avet (datom e0 a v tx0) (datom emax a v txmax) :avet)
+                    (->> (-slice avet (datom s0 a v tx0) (datom emax a v txmax) :avet)
                          (filter (fn [^Datom d] (= tx (datom-tx d)))))
-                    (->> (-slice aevt (datom e0 a nil tx0) (datom emax a nil txmax) :aevt)
+                    (->> (-slice aevt (datom s0 a nil tx0) (datom emax a nil txmax) :aevt)
                          (filter (fn [^Datom d] (and (= v (.-v d))
                                                      (= tx (datom-tx d)))))))
                   (if indexed?                              ;; _ a v _
-                    (-slice avet (datom e0 a v tx0) (datom emax a v txmax) :avet)
-                    (->> (-slice aevt (datom e0 a nil tx0) (datom emax a nil txmax) :aevt)
+                    (-slice avet (datom s0 a v tx0) (datom emax a v txmax) :avet)
+                    (->> (-slice aevt (datom s0 a nil tx0) (datom emax a nil txmax) :aevt)
                          (filter (fn [^Datom d] (= v (.-v d))))))
-                  (->> (-slice aevt (datom e0 a nil tx0) (datom emax a nil txmax) :aevt) ;; _ a _ tx
+                  (->> (-slice aevt (datom s0 a nil tx0) (datom emax a nil txmax) :aevt) ;; _ a _ tx
                        (filter (fn [^Datom d] (= tx (datom-tx d)))))
-                  (-slice aevt (datom e0 a nil tx0) (datom emax a nil txmax) :aevt) ;; _ a _ _
+                  (-slice aevt (datom s0 a nil tx0) (datom emax a nil txmax) :aevt) ;; _ a _ _
                   (filter (fn [^Datom d] (and (= v (.-v d)) (= tx (datom-tx d)))) (-all eavt)) ;; _ _ v tx
                   (filter (fn [^Datom d] (= v (.-v d))) (-all eavt)) ;; _ _ v _
                   (filter (fn [^Datom d] (= tx (datom-tx d))) (-all eavt)) ;; _ _ _ tx
                   (-all eavt)]))))
 
-(defrecord-updatable DB [schema eavt aevt avet temporal-eavt temporal-aevt temporal-avet max-eid max-tx rschema hash config]
+(defrecord-updatable DB [schema eavt aevt avet temporal-eavt temporal-aevt temporal-avet max-eid max-tx max-sid rschema hash config]
   #?@(:cljs
       [IHash (-hash [db] hash)
        IEquiv (-equiv [db other] (equiv-db db other))
@@ -221,6 +220,8 @@
   (-temporal-index? [db] (-keep-history? db))
   (-keep-history? [db] (-> db -config :keep-history?))
   (-max-tx [db] (.-max-tx db))
+  (-max-eid [db] (.-max-eid db))
+  (-max-sid [db] (.-max-sid db))
   (-config [db] (.-config db))
 
   ISearch
@@ -231,19 +232,19 @@
   IIndexAccess
   (-datoms [db index-type cs]
     (-slice (get db index-type)
-            (components->pattern db index-type cs e0 tx0)
+            (components->pattern db index-type cs s0 tx0)
             (components->pattern db index-type cs emax txmax)
             index-type))
 
   (-seek-datoms [db index-type cs]
     (-slice (get db index-type)
-            (components->pattern db index-type cs e0 tx0)
+            (components->pattern db index-type cs s0 tx0)
             (datom emax nil nil txmax)
             index-type))
 
   (-rseek-datoms [db index-type cs]
     (-> (-slice (get db index-type)
-                (components->pattern db index-type cs e0 tx0)
+                (components->pattern db index-type cs s0 tx0)
                 (datom emax nil nil txmax)
                 index-type)
         vec
@@ -254,7 +255,7 @@
       (raise "Attribute" attr "should be marked as :db/index true" {}))
     (validate-attr attr (list '-index-range 'db attr start end) db)
     (-slice avet
-            (resolve-datom db nil attr start nil e0 tx0)
+            (resolve-datom db nil attr start nil s0 tx0)
             (resolve-datom db nil attr end nil emax txmax)
             :avet))
 
@@ -263,8 +264,8 @@
 
   clojure.data/Diff
   (diff-similar [a b]
-    (let [datoms-a (-slice (:eavt a) (datom e0 nil nil tx0) (datom emax nil nil txmax) :eavt)
-          datoms-b (-slice (:eavt b) (datom e0 nil nil tx0) (datom emax nil nil txmax) :eavt)]
+    (let [datoms-a (-slice (:eavt a) (datom s0 nil nil tx0) (datom emax nil nil txmax) :eavt)
+          datoms-b (-slice (:eavt b) (datom s0 nil nil tx0) (datom emax nil nil txmax) :eavt)]
       (dd/diff-sorted datoms-a datoms-b dd/cmp-datoms-eavt-quick))))
 
 (defn db? [x]
@@ -315,6 +316,8 @@
   (-temporal-index? [db] (-keep-history? db))
   (-keep-history? [db] (-keep-history? (.-unfiltered-db db)))
   (-max-tx [db] (-max-tx (.-unfiltered-db db)))
+  (-max-eid [db] (-max-eid (.-unfiltered-db db)))
+  (-max-sid [db] (-max-sid (.-unfiltered-db db)))
   (-config [db] (-config (.-unfiltered-db db)))
 
   ISearch
@@ -438,6 +441,8 @@
   (-temporal-index? [db] (-keep-history? db))
   (-keep-history? [db] (-keep-history? (.-origin-db db)))
   (-max-tx [db] (-max-tx (.-origin-db db)))
+  (-max-eid [db] (-max-eid (.-origin-db db)))
+  (-max-sid [db] (-max-sid (.-origin-db db)))
   (-config [db] (-config (.-origin-db db)))
 
   ISearch
@@ -533,6 +538,8 @@
   (-temporal-index? [db] (-keep-history? db))
   (-keep-history? [db] (-keep-history? (.-origin-db db)))
   (-max-tx [db] (-max-tx (.-origin-db db)))
+  (-max-sid [db] (-max-sid (.-origin-db db)))
+  (-max-eid [db] (-max-eid (.-origin-db db)))
   (-config [db] (-config (.-origin-db db)))
 
   ISearch
@@ -622,6 +629,8 @@
   (-temporal-index? [db] (-keep-history? db))
   (-keep-history? [db] (-keep-history? (.-origin-db db)))
   (-max-tx [db] (-max-tx (.-origin-db db)))
+  (-max-sid [db] (-max-sid (.-origin-db db)))
+  (-max-eid [db] (-max-eid (.-origin-db db)))
   (-config [db] (-config (.-origin-db db)))
 
   ISearch
@@ -721,25 +730,23 @@
     (raise "Incomplete schema attributes, expected at least :db/valueType, :db/cardinality"
            (ds/explain-old-schema schema))))
 
-(defn- max-system-eid []
-  (->> system-schema
-       rest
-       (map first)
-       (apply max)))
-
 (defn init-max-eid [eavt]
   ;; solved with reserse slice first in datascript
   (if-let [datoms (-slice
                    eavt
                    (datom e0 nil nil tx0)
-                   (datom (dec tx0) nil nil txmax)
+                   (datom emax nil nil txmax)
                    :eavt)]
     (-> datoms vec rseq first :e)                           ;; :e of last datom in slice
     e0))
 
-(defn get-max-tx [eavt]
-  (transduce (map (fn [^Datom d] (datom-tx d))) max tx0 (-all eavt)))
 
+(defn get-max-tx [eavt]
+  (transduce
+    (map (fn [^Datom d] (datom-tx d)))
+    max
+    tx0
+    (-all eavt)))
 
 (defn ^DB empty-db
   "Prefer create-database in api, schema not in index."
@@ -756,23 +763,18 @@
          schema (merge implicit-schema schema)
          rschema (rschema schema)
          indexed (:db/index rschema)
-         system-idents (->> system-schema
-                            (filter (fn [[_ a _ _]] (= 1 a))))
          eavt (if attribute-refs?
-                (di/init-index index (dd/coll->datoms system-schema) indexed :eavt)
+                (di/init-index index ref-datoms indexed :eavt)
                 (di/empty-index index :eavt))
          aevt (if attribute-refs?
-                (di/init-index index (dd/coll->datoms system-schema) indexed :aevt)
+                (di/init-index index ref-datoms indexed :aevt)
                 (di/empty-index index :aevt))
          avet (if attribute-refs?
-                (di/init-index index (dd/coll->datoms system-idents) indexed :avet)
+                (di/init-index index (filter (fn [e a v t] )) indexed :aevt)
                 (di/empty-index index :avet))
-         max-eid (if attribute-refs?
-                   (init-max-eid eavt)
-                   e0)
-         max-tx (if attribute-refs?
-                  (get-max-tx eavt)
-                  tx0)]
+         max-eid e0
+         max-sid c/u0
+         max-tx tx0]
      (map->DB
       (merge
        {:schema schema
@@ -782,6 +784,7 @@
         :aevt aevt
         :avet avet
         :max-eid max-eid
+        :max-sid c/u0
         :max-tx max-tx
         :hash    0}
        (when keep-history?
@@ -796,6 +799,7 @@
    datoms))
 
 (defn ^DB init-db
+  ;; TODO add init-max-sid
   ([datoms] (init-db datoms nil nil))
   ([datoms schema] (init-db datoms schema nil))
   ([datoms schema config]
@@ -823,6 +827,7 @@
                       :avet    avet
                       :max-eid max-eid
                       :max-tx  max-tx
+                      :max-sid c/u0
                       :hash    (hash-datoms datoms)}
                      (when keep-history?
                        {:temporal-eavt (di/empty-index index :eavt)
@@ -849,17 +854,16 @@
 #?(:cljs
    (defn pr-db [db w opts]
      (-write w "#datahike/DB {")
-     (-write w ":schema ")
-     (pr-writer (-schema db) w opts)
+     (-write w (str ":max-tx " (-max-tx db) " "))
+     (-write w (str ":max-eid " (-max-eid db) " "))
      (-write w "}")))
 
 #?(:clj
    (do
      (defn pr-db [db, ^java.io.Writer w]
        (.write w (str "#datahike/DB {"))
-       (.write w ":schema ")
-       (binding [*out* w]
-         (pr (-schema db)))
+       (.write w (str ":max-tx " (-max-tx db) " "))
+       (.write w (str ":max-eid " (-max-eid db)))
        (.write w "}"))
 
      (defmethod print-method DB [db w] (pr-db db w))
@@ -1060,6 +1064,9 @@
 (defn next-eid [db]
   (inc (:max-eid db)))
 
+(defn next-sid [db]
+  (inc (:max-sid db)))
+
 (defn- #?@(:clj  [^Boolean tx-id?]
            :cljs [^boolean tx-id?])
   [e]
@@ -1076,11 +1083,17 @@
 (defn advance-max-eid [db eid]
   (cond-> db
           (and (> eid (:max-eid db))
-               (< eid tx0))                                 ;; do not trigger advance if transaction id was referenced
+               (< txmax eid))                                 ;; do not trigger advance if transaction id was referenced
           (assoc :max-eid eid)))
 
 (defn advance-max-tid [db tid]
   (assoc db :max-tx tid))
+
+(defn advance-max-sid [db sid]
+  (cond-> db
+    (and (> sid (:max-sid db))
+         (< sid tx0))
+    (assoc :max-sid sid)))
 
 (defn- allocate-eid
   ([report eid]
@@ -1093,6 +1106,18 @@
            (assoc-in [:tempids e] eid)
            true
            (update-in [:db-after] advance-max-eid eid))))
+
+(defn- allocate-sid
+  ([report sid]
+   (update-in report [:db-after] advance-max-sid sid))
+  ([report e sid]
+   (cond-> report
+     (tx-id? e)
+     (assoc-in [:tempids e] sid)
+     (tempid? e)
+     (assoc-in [:tempids e] sid)
+     true
+     (update-in [:db-after] advance-max-sid sid))))
 
 (defn update-schema [db ^Datom datom]
   (let [schema (:schema db)
@@ -1145,9 +1170,10 @@
               true (update-in [:eavt] #(di/-insert % datom :eavt))
               true (update-in [:aevt] #(di/-insert % datom :aevt))
               indexing? (update-in [:avet] #(di/-insert % datom :avet))
-              true (advance-max-eid (.-e datom))
+              (not schema?) (advance-max-eid (.-e datom))
               true (update :hash + (hash datom))
-              schema? (-> (update-schema datom)
+              schema? (-> (advance-max-sid (.-e datom))
+                          (update-schema datom)
                           update-rschema))
       (if-some [removing ^Datom (first (-search db [(.-e datom) (.-a datom) (.-v datom)]))]
         (cond-> db
@@ -1410,10 +1436,15 @@
             (or (number? old-eid)
                 (nil? old-eid)
                 (string? old-eid))
-            (let [new-eid (cond
-                            (nil? old-eid) (next-eid db)
+            (let [schema-entity? (ds/schema-entity? entity)
+                  new-eid (cond
+                            (nil? old-eid) (if schema-entity?
+                                             (next-sid db)
+                                             (next-eid db))
                             (tempid? old-eid) (or (get tempids old-eid)
-                                                  (next-eid db))
+                                                  (if schema-entity?
+                                                    (next-sid db)
+                                                    (next-eid db)))
                             :else old-eid)
                   new-entity (assoc entity :db/id new-eid)]
               (when (ds/schema-entity? entity)
@@ -1436,7 +1467,8 @@
                    {:error :entity-id/syntax, :entity entity})))
 
         (sequential? entity)
-        (let [[op e a v] entity]
+        (let [[op e a v] entity
+              schema-attr? (ds/schema-attr? a)]
           (cond
             (= op :db.fn/call)
             (let [[_ f & args] entity]
@@ -1495,13 +1527,20 @@
                   allocated-eid (get tempids e)]
               (if (and upserted-eid allocated-eid (not= upserted-eid allocated-eid))
                 (retry-with-tempid initial-report report initial-es e upserted-eid)
-                (let [eid (or upserted-eid allocated-eid (next-eid db))]
-                  (recur (allocate-eid report e eid) (cons [op eid a v] entities)))))
+                (let [eid (or upserted-eid allocated-eid (if schema-attr?
+                                                           (next-sid db)
+                                                           (next-eid db)))]
+                  (recur (if schema-attr?
+                           (allocate-sid report e eid)
+                           (allocate-eid report e eid))
+                         (cons [op eid a v] entities)))))
 
             (and (ref? db a) (tempid? v))
             (if-let [vid (get tempids v)]
               (recur report (cons [op e a vid] entities))
-              (recur (allocate-eid report v (next-eid db)) es))
+              (recur (if schema-attr?
+                       (allocate-sid report v (next-sid db))
+                       (allocate-eid report v (next-eid db))) es))
 
             (= op :db/add)
             (recur (transact-add report entity) entities)
