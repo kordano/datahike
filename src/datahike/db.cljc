@@ -764,10 +764,10 @@
          rschema (rschema schema)
          indexed (:db/index rschema)
          eavt (if attribute-refs?
-                (di/init-index index ref-datoms indexed :eavt)
+                (di/init-index index c/ref-datoms indexed :eavt)
                 (di/empty-index index :eavt))
          aevt (if attribute-refs?
-                (di/init-index index ref-datoms indexed :aevt)
+                (di/init-index index c/ref-datoms indexed :aevt)
                 (di/empty-index index :aevt))
          avet (if attribute-refs?
                 (di/init-index index (filter (fn [e a v t] )) indexed :aevt)
@@ -784,7 +784,7 @@
         :aevt aevt
         :avet avet
         :max-eid max-eid
-        :max-sid c/u0
+        :max-sid max-sid
         :max-tx max-tx
         :hash    0}
        (when keep-history?
@@ -1124,6 +1124,10 @@
         e (.-e datom)
         a (.-a datom)
         v (.-v datom)]
+    (when (< e c/u0)
+      (raise (str "System schema update not allowed")
+             {:error :transact/schema
+              :entity [e a v]}))
     (if (= a :db/ident)
       (if (schema v)
         (raise (str "Schema with attribute " v " already exists")
